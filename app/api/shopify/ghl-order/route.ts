@@ -35,6 +35,7 @@ import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 const API_VERSION = "2025-01";
 const ENDPOINT_VERSION = 3; // bump to confirm which build is live
@@ -212,6 +213,47 @@ export async function GET(req: Request) {
     }
   }
 
+  // ?cancelLoop=1&from=<order#>&to=<order#>[&confirm=1] (secret header) →
+  // cancel $0 bridge orders in that order-number range. Dry run unless confirm=1.
+  // Processes up to 40 per call; call again until `remaining` is 0.
+  if (url.searchParams.get("cancelLoop") && c.domain && hasAuth) {
+    if (req.headers.get("x-webhook-secret") !== c.secret) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+    const from = Number(url.searchParams.get("from"));
+    const to = Number(url.searchParams.get("to"));
+    const confirm = url.searchParams.get("confirm") === "1";
+    if (!from || !to || to < from) return NextResponse.json({ error: "from/to order numbers required" }, { status: 400 });
+    try {
+      type O = { id: number; name: string; order_number: number; total_price: string; tags: string; cancelled_at: string | null; email: string; note_attributes: { name: string; value: string }[] };
+      const matches: O[] = [];
+      let sinceId = 0;
+      for (let page = 0; page < 8; page++) {
+        const r = await shopify(`orders.json?status=any&limit=250&since_id=${sinceId}&fields=id,name,order_number,total_price,tags,cancelled_at,email,note_attributes`);
+        const batch = ((r.json as { orders?: O[] })?.orders) || [];
+        if (!batch.length) break;
+        for (const o of batch) {
+          const tags = o.tags.split(",").map((t) => t.trim());
+          if (o.order_number >= from && o.order_number <= to && tags.includes("GHL") && Number(o.total_price) === 0 && !o.cancelled_at) matches.push(o);
+        }
+        sinceId = batch[batch.length - 1].id;
+        if (batch[batch.length - 1].order_number > to) break;
+      }
+      if (!confirm) {
+        return NextResponse.json({ dryRun: true, wouldCancel: matches.length, first: matches[0]?.name, last: matches[matches.length - 1]?.name, sources: [...new Set(matches.map((m) => m.note_attributes.find((n) => n.name === "Source")?.value))] });
+      }
+      const cancelled: string[] = [];
+      const failed: { name: string; error: unknown }[] = [];
+      for (const o of matches.slice(0, 40)) {
+        const r = await shopify(`orders/${o.id}/cancel.json`, { method: "POST", body: JSON.stringify({ reason: "other", email: false, restock: true }) });
+        if (r.ok) cancelled.push(o.name); else failed.push({ name: o.name, error: r.json });
+      }
+      return NextResponse.json({ cancelled: cancelled.length, failed, remaining: Math.max(0, matches.length - cancelled.length - failed.length) });
+    } catch (e) {
+      return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 502 });
+    }
+  }
+
   // ?products=1 → list product titles + variant IDs to fill in SHOPIFY_PRODUCT_MAP.
   // Read-only, and only works once the Shopify credentials are in place.
   if (url.searchParams.get("products") && c.domain && hasAuth) {
@@ -367,6 +409,20 @@ async function handlePost(
   ).trim();
   const ghlOrderId = nestedOrderId || pick(body, "order_id", "orderId", "transaction_id", "payment_id", "id");
   trace({ ghlOrderId });
+
+  // ── Loop guard ──
+  // GHL's Shopify integration imports every Shopify order (including the ones
+  // this bridge creates) back into GHL as an "external" order, which re-fires
+  // the Order Submitted trigger. Only act on orders that came from a GHL
+  // checkout (form/funnel/etc.) and carry a real GHL order id. Respond 200 so
+  // GHL does not retry.
+  const ghlSource = String(ghlOrder.source || "").toLowerCase();
+  if (ghlSource === "external" || ghlSource === "shopify") {
+    return NextResponse.json({ ok: true, skipped: true, reason: `GHL order source "${ghlSource}" is not a GHL checkout` });
+  }
+  if (!nestedOrderId) {
+    return NextResponse.json({ ok: true, skipped: true, reason: "No GHL order id in payload (not an Order Submitted event from a GHL checkout)" });
+  }
   // Shopify tags: max 40 chars, keep to safe characters.
   const dedupTag = ghlOrderId ? `ghl-${ghlOrderId.replace(/[^A-Za-z0-9_-]+/g, "-")}`.slice(0, 40) : "";
   if (dedupTag) {
@@ -374,10 +430,30 @@ async function handlePost(
     const existing = await shopify(
       `orders.json?status=any&limit=250&fields=id,name,tags&created_at_min=${encodeURIComponent(since)}`,
     );
-    const orders = ((existing.json as { orders?: { id: number; name: string; tags: string }[] })?.orders) || [];
+    type Recent = { id: number; name: string; tags: string; created_at: string; email: string; cancelled_at: string | null };
+    const orders = ((existing.json as { orders?: Recent[] })?.orders) || [];
     const dup = orders.find((o) => o.tags.split(",").map((t) => t.trim()).includes(dedupTag));
     if (dup) {
       return NextResponse.json({ ok: true, duplicate: true, shopifyOrder: dup.name, shopifyOrderId: dup.id });
+    }
+    const hourAgo = Date.now() - 60 * 60 * 1000;
+    const bridgeLastHour = orders.filter(
+      (o) => o.tags.split(",").map((t) => t.trim()).includes("GHL") && new Date(o.created_at).getTime() > hourAgo,
+    );
+    if (bridgeLastHour.length >= 15) {
+      console.error("ghl-order circuit breaker tripped:", bridgeLastHour.length, "bridge orders in the last hour");
+      return NextResponse.json(
+        { ok: true, skipped: true, reason: `Circuit breaker: ${bridgeLastHour.length} bridge orders in the last hour — refusing until it clears` },
+      );
+    }
+    const sameCustomerRecently = bridgeLastHour.find(
+      (o) => (o.email || "").toLowerCase() === email.toLowerCase() && new Date(o.created_at).getTime() > Date.now() - 10 * 60 * 1000,
+    );
+    if (sameCustomerRecently) {
+      return NextResponse.json({
+        ok: true, skipped: true, duplicate: true, shopifyOrder: sameCustomerRecently.name,
+        reason: "Same customer already got a bridge order in the last 10 minutes",
+      });
     }
   }
 
