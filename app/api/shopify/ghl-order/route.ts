@@ -254,6 +254,45 @@ export async function GET(req: Request) {
     }
   }
 
+  // ?inspect=<text> (secret header) → recent orders whose line items match <text>,
+  // with fulfillment routing details, to compare bridge orders with manual ones.
+  if (url.searchParams.get("inspect") && c.domain && hasAuth) {
+    if (req.headers.get("x-webhook-secret") !== c.secret) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+    const q = url.searchParams.get("inspect")!.toLowerCase();
+    try {
+      type LI = { title: string; quantity: number; fulfillment_service: string; fulfillment_status: string | null; requires_shipping: boolean; variant_id: number };
+      type O = { id: number; name: string; created_at: string; source_name: string; total_price: string; tags: string; cancelled_at: string | null; financial_status: string; fulfillment_status: string | null; location_id: number | null; line_items: LI[]; fulfillments?: { location_id: number; status: string; service: string; tracking_company: string | null }[] };
+      const r = await shopify(`orders.json?status=any&limit=250&fields=id,name,created_at,source_name,total_price,tags,cancelled_at,financial_status,fulfillment_status,location_id,line_items,fulfillments`);
+      const all = ((r.json as { orders?: O[] })?.orders) || [];
+      const hits = all.filter((o) => o.line_items.some((li) => li.title.toLowerCase().includes(q)) && !o.tags.includes("GHL")).slice(0, 8);
+      const bridge = all.filter((o) => o.tags.split(",").map((t) => t.trim()).includes("GHL")).slice(0, 2);
+      const fo: Record<string, unknown> = {};
+      for (const o of [...hits.slice(0, 3), ...bridge.slice(0, 1)]) {
+        const f = await shopify(`orders/${o.id}/fulfillment_orders.json`);
+        fo[o.name] = f.ok
+          ? ((f.json as { fulfillment_orders?: { status: string; request_status: string; assigned_location: { name: string; location_id: number }; delivery_method?: { method_type: string } }[] })?.fulfillment_orders || []).map((x) => ({ status: x.status, request_status: x.request_status, location: x.assigned_location?.name, location_id: x.assigned_location?.location_id, delivery: x.delivery_method?.method_type }))
+          : { status: f.status, error: f.json };
+      }
+      const variants: Record<string, unknown> = {};
+      for (const [k, id] of Object.entries(c.productMap)) {
+        const v = await shopify(`variants/${id}.json?fields=id,fulfillment_service,inventory_management,inventory_item_id,requires_shipping,inventory_quantity`);
+        variants[k] = (v.json as { variant?: unknown })?.variant ?? v.json;
+      }
+      const loc = await shopify(`locations.json`);
+      const summarize = (o: O) => ({
+        order: o.name, created: o.created_at, source: o.source_name, total: o.total_price, paid: o.financial_status,
+        fulfillment: o.fulfillment_status || "unfulfilled", cancelled: Boolean(o.cancelled_at),
+        items: o.line_items.map((li) => `${li.quantity}× ${li.title} [service=${li.fulfillment_service}, ships=${li.requires_shipping}]`),
+        fulfillments: (o.fulfillments || []).map((f) => `${f.status} via ${f.service} @loc ${f.location_id} (${f.tracking_company || "no tracking"})`),
+      });
+      return NextResponse.json({ manualOrders: hits.map(summarize), bridgeOrders: bridge.map(summarize), fulfillmentOrders: fo, variants, locations: loc.ok ? loc.json : { status: loc.status } });
+    } catch (e) {
+      return NextResponse.json({ error: e instanceof Error ? e.message : String(e) }, { status: 502 });
+    }
+  }
+
   // ?products=1 → list product titles + variant IDs to fill in SHOPIFY_PRODUCT_MAP.
   // Read-only, and only works once the Shopify credentials are in place.
   if (url.searchParams.get("products") && c.domain && hasAuth) {
