@@ -264,7 +264,8 @@ export async function GET(req: Request) {
     try {
       type LI = { title: string; quantity: number; fulfillment_service: string; fulfillment_status: string | null; requires_shipping: boolean; variant_id: number };
       type O = { id: number; name: string; created_at: string; source_name: string; total_price: string; tags: string; cancelled_at: string | null; financial_status: string; fulfillment_status: string | null; location_id: number | null; line_items: LI[]; fulfillments?: { location_id: number; status: string; service: string; tracking_company: string | null }[] };
-      const r = await shopify(`orders.json?status=any&limit=250&fields=id,name,created_at,source_name,total_price,tags,cancelled_at,financial_status,fulfillment_status,location_id,line_items,fulfillments`);
+      const before = url.searchParams.get("before");
+      const r = await shopify(`orders.json?status=any&limit=250${before ? `&created_at_max=${encodeURIComponent(before)}` : ""}&fields=id,name,created_at,source_name,total_price,tags,cancelled_at,financial_status,fulfillment_status,location_id,line_items,fulfillments`);
       const all = ((r.json as { orders?: O[] })?.orders) || [];
       const hits = all.filter((o) => o.line_items.some((li) => li.title.toLowerCase().includes(q)) && !o.tags.includes("GHL")).slice(0, 8);
       const bridge = all.filter((o) => o.tags.split(",").map((t) => t.trim()).includes("GHL")).slice(0, 2);
