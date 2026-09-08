@@ -7,6 +7,9 @@ import Link from "next/link";
 // Every result routes to the $7, 20-minute reservation call.
 const BOOK_CALL_URL = "/book-your-call";
 const BOOK_CALL_LABEL = "Reserve Your Call — $7 →";
+// Academy-tier results go to the free masterclass invite instead of the call.
+const MASTERCLASS_INVITE_URL = "/free-masterclass/invite";
+const MASTERCLASS_INVITE_LABEL = "Save My Free Seat — This Saturday →";
 
 type TierKey = "academy" | "platinum" | "vip";
 
@@ -20,9 +23,13 @@ const RESULTS: Record<
     seeText: string;
     url: string | null; // null = tier page not on the site yet
     testi: string;
+    ctaUrl: string;
+    ctaLabel: string;
   }
 > = {
   academy: {
+    ctaUrl: MASTERCLASS_INVITE_URL,
+    ctaLabel: MASTERCLASS_INVITE_LABEL,
     title: "START WITH THE ACADEMY",
     desc: "The complete Cali K9 5 Pillar, 50-Step System™ across all 8 modules, laid out as a clear roadmap you follow from home — meet your dog where they are today and work the steps, in order, toward the trained dog you want. Includes Saturday Live sessions with Jas, the 30-Day Progress Guarantee™, and a free bag of Turbo Treats.",
     price: "$97",
@@ -32,6 +39,8 @@ const RESULTS: Record<
     testi: "“My dog is off-leash reliable at 8 months old.” — Amanda K., Miami, FL",
   },
   platinum: {
+    ctaUrl: BOOK_CALL_URL,
+    ctaLabel: BOOK_CALL_LABEL,
     title: "ELITE IS YOUR FIT",
     desc: "Everything in the Academy plus 6 months of access, 4 Wednesday small-group coaching sessions with Jas, and personalized troubleshooting making sure each step is done correctly — moving your dog from chaos to control faster.",
     price: "$997",
@@ -41,6 +50,8 @@ const RESULTS: Record<
     testi: "“Worth every penny. Dog came back calm, focused, obedient.” — Jessica R., Oakland, CA",
   },
   vip: {
+    ctaUrl: BOOK_CALL_URL,
+    ctaLabel: BOOK_CALL_LABEL,
     title: "VIP IS YOUR FIT",
     desc: "The full 5 Pillar, 50-Step System with a full year of access, 8 Wednesday coaching sessions, priority booking, the Training Kit included, and a private WhatsApp line to the team for support within 24 hours — the highest level of support for owners working through fear, reactivity, or a dog that is testing every boundary.",
     price: "$2,497",
@@ -548,8 +559,8 @@ export default function AssessmentQuiz() {
           <div className="bg-cream rounded-xl px-5 py-4 mb-5 font-body text-[13.5px] italic text-ink/80 text-left">
             {result.testi}
           </div>
-          <Link href={BOOK_CALL_URL} className="btn btn-blue w-full">
-            {BOOK_CALL_LABEL}
+          <Link href={result.ctaUrl} className="btn btn-blue w-full">
+            {result.ctaLabel}
           </Link>
           {result.url && (
             <p className="font-body text-[13px] text-gray-muted mt-6 pt-6 border-t border-border">

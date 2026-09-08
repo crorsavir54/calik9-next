@@ -19,6 +19,7 @@ const LANDER_ROUTES = new Set([
   "/turbo-treats-chicken-hearts",
   "/free-masterclass",
   "/free-masterclass/thank-you",
+  "/free-masterclass/invite",
 ]);
 
 export function isLanderPath(pathname: string): boolean {
